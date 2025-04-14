@@ -1,80 +1,32 @@
-from django.shortcuts import render
-from main.models import User, UserDevice, Video
-from main.serializers import UserSerializers, UserDeviceSerializer
-from rest_framework.decorators import api_view,permission_classes
-from rest_framework.response import Response
-from django.contrib.auth import login, logout, authenticate
-from rest_framework.permissions import IsAuthenticated
-from rest_framework.generics import ListAPIView, ListCreateAPIView, UpdateAPIView, DestroyAPIView
-from .tokens import *
-from rest_framework.views import APIView
-from django.shortcuts import get_object_or_404, Http404
-import httpagentparser
+from rest_framework.permissions import AllowAny, IsAuthenticated
+from django.db import IntegrityError
+from django.core.exceptions import ValidationError
+from django.contrib.auth import login, authenticate, logout
+from main.serializers import *
+from django.utils import timezone
 import hashlib
-from rest_framework import status
+import httpagentparser
+from rest_framework_simplejwt.tokens import RefreshToken
 import requests
 import json
-import requests
+from .permissions import IsStaff
+from datetime import timedelta
+from rest_framework.decorators import api_view, permission_classes
+from rest_framework.response import Response
+from rest_framework import status
+from main.models import Video, Book, News
+from main.serializers import VideoSerializer, BookSerializer, NewsSerializer
+from django.shortcuts import get_object_or_404
+from drf_yasg.utils import swagger_auto_schema
+from drf_yasg import openapi
 
 
-@api_view(['GET'])
-def get_video(request):
-    url = "https://dev.vdocipher.com/api/videos/a06c8ec5549e42e2a9cf9e76006d61d1"
-
-    headers = {
-        'Authorization': "Apisecret oPAn8FitJWIAAXcP0ZKaa1pWDHahJBIgTOc9v3KYz7M2SlLswoxFhJUbAXSaDDKm",
-        'Content-Type': "application/json",
-        'Accept': "application/json"
+def get_tokens_for_user(user):
+    refresh = RefreshToken.for_user(user)
+    return {
+        'refresh': str(refresh),
+        'access': str(refresh.access_token),
     }
-
-    response = requests.request("GET", url, headers=headers)
-
-    return Response(response.text)
-
-@api_view(['POST'])
-def api_video(request):
-    # Fetch all valid video_ids from the database
-    valid_video_ids = [video.video_id for video in Video.objects.all()]
-
-    if not valid_video_ids:
-        return Response({"error": "No valid video IDs found in the database"}, status=status.HTTP_404_NOT_FOUND)
-
-    # Initialize a list to collect the results
-    results = []
-
-    # Loop through each valid video_id
-    for video_id in valid_video_ids:
-        url = f"https://dev.vdocipher.com/api/videos/{video_id}/otp"
-
-        # Prepare the payload and headers
-        payload = json.dumps({"whitelisthref": "getfit.uz"})
-        headers = {
-            'Authorization': "Apisecret OiQICe19GCEiAXzHj3QWsRfMlyucRiVOTqi1geoVDvZUZk6O333HRX2W3JKDv6Ed",
-            'Content-Type': "application/json",
-            'Accept': "application/json"
-        }
-
-        try:
-            # Send the POST request to get the OTP
-            response = requests.request('POST', url, data=payload, headers=headers)
-
-            # Handle the response
-            if response.status_code == 200:
-                result = response.json()
-                result['video_id'] = video_id  # Add video_id to the result
-                results.append(result)
-            else:
-                results.append({"video_id": video_id, "error": response.text})
-
-        except requests.exceptions.ProxyError as e:
-            results.append({"video_id": video_id, "error": "ProxyError occurred", "details": str(e)})
-        except Exception as e:
-            results.append({"video_id": video_id, "error": "An error occurred", "details": str(e)})
-
-    # Return the combined results as JSON response
-    return Response(results, status=status.HTTP_200_OK)
-
-
 
 
 def get_device_id(request):
@@ -95,171 +47,398 @@ def get_device_name(user_agent):
     browser_version = browser_info.get('version', '')
     return f"{device_name} {device_version} - {browser_name} {browser_version}"
 
-
+@swagger_auto_schema(
+    method='post',
+    operation_description="Foydalanuvchini ro'yxatdan o'tkazadi.",
+    request_body=openapi.Schema(
+        type=openapi.TYPE_OBJECT,
+        required=['phone_number', 'password', 'device_id'],
+        properties={
+            'phone_number': openapi.Schema(type=openapi.TYPE_STRING, example='+998901234567'),
+            'password': openapi.Schema(type=openapi.TYPE_STRING, example='parol123'),
+            'device_id': openapi.Schema(type=openapi.TYPE_STRING, example='abcd1234'),
+            'device_name': openapi.Schema(type=openapi.TYPE_STRING, example='Redmi Note 11'),
+        },
+    ),
+    responses={
+        201: openapi.Response('Ro‘yxatdan o‘tish muvaffaqiyatli', examples={'application/json': {
+            'message': 'Foydalanuvchi muvaffaqiyatli ro‘yxatdan o‘tdi. Siz hozircha blokdasiz.',
+            'access': 'jwt-access-token',
+            'refresh': 'jwt-refresh-token'
+        }}),
+        400: 'Xatolik'
+    }
+)
 @api_view(['POST'])
-def signin_view(request):
+@permission_classes([AllowAny])
+def signup_api(request):
     phone_number = request.data.get('phone_number')
     password = request.data.get('password')
+    device_id = request.data.get('device_id')
+    device_name = request.data.get('device_name') or "unknown"
+
+    if not phone_number or not password or not device_id:
+        return Response({"error": "Telefon raqami, parol va qurilma ID talab qilinadi."}, status=status.HTTP_400_BAD_REQUEST)
+
+    phone_validator = RegexValidator(
+        regex=r'^\+998\d{9}$',
+        message='Telefon raqami +998XXXXXXXXX formatida bo‘lishi kerak.'
+    )
 
     try:
-        usr = authenticate(username=phone_number, password=password)
-        if usr is not None:
-            device_count = UserDevice.objects.filter(user=usr).count()
+        phone_validator(phone_number)
 
-            if device_count < 3:
-                login(request, usr)
+        user = User(username=phone_number, phone_number=phone_number, status='Block')
+        user.set_password(password)
+        user.save()
 
-                device_id = get_device_id(request)
-                device_name = get_device_name(request.META['HTTP_USER_AGENT'])
+        UserDevice.objects.create(user=user, device_id=device_id, device_name=device_name)
 
-                user_device, created = UserDevice.objects.get_or_create(
-                    user=usr,
-                    device_id=device_id,
-                    defaults={'device_name': device_name}
-                )
+        login(request, user)
+        tokens = get_tokens_for_user(user)
 
-                if device_count > 3:
-                    oldest_device = UserDevice.objects.filter(user=usr).order_by('last_login').first()
-                    oldest_device.delete()
+        return Response({
+            'message': 'Foydalanuvchi muvaffaqiyatli ro‘yxatdan o‘tdi. Siz hozircha blokdasiz.',
+            'access': tokens['access'],
+            'refresh': tokens['refresh']
+        }, status=status.HTTP_201_CREATED)
 
-                tokens = get_tokens_for_user(usr)
-                status_code = 200
-                data = {
-                    'status': status_code,
-                    'phone_number': phone_number,
-                    'token': tokens,
-                    'device': UserDeviceSerializer(user_device).data,
-                }
-            else:
-                status_code = 403
-                message = "The number of devices is sufficient"
-                data = {
-                    'status': status_code,
-                    'message': message,
-                }
-        else:
-            status_code = 403
-            message = "Invalid Password or Phone Number!"
-            data = {
-                'status': status_code,
-                'message': message,
-            }
-    except User.DoesNotExist:
-        status_code = 404
-        message = 'This User is not defined!'
-        data = {
-            'status': status_code,
-            'message': message,
-        }
-    except Exception as err:
-        return Response({'error': str(err)}, status=500)
-    return Response(data, status=status_code)
-
-
-@api_view(['POST'])
-def signup_view(request):
-    # Ma'lumotlarni olish
-    phone_number = request.data.get('phone_number')
-    first_name = request.data.get('first_name')
-    password = request.data.get('password')
-
-    # Majburiy maydonlar to'ldirilganligini tekshirish
-    if not phone_number or not password:
-        return Response({"error": "Phone number and password are required."}, status=400)
-
-    try:
-        # Telefon raqamini username sifatida ishlatish
-        new_user = User.objects.create_user(
-            first_name=first_name,
-            username=phone_number,  # Telefon raqamini username sifatida belgilash
-            phone_number=phone_number,
-            password=password
-        )
-        # Serializatsiya qilish
-        ser = UserSerializers(new_user)
-        # Javob qaytarish
-        return Response(ser.data, status=201)
-
+    except ValidationError:
+        return Response({'error': 'Telefon raqamni +998XXXXXXXXX formatida kiriting'}, status=status.HTTP_400_BAD_REQUEST)
+    except IntegrityError:
+        return Response({'error': 'Bu telefon raqami allaqachon roʻyxatdan oʻtgan.'}, status=status.HTTP_400_BAD_REQUEST)
     except Exception as e:
-        # Xatolik holatida javob qaytarish
-        return Response({"error": str(e)}, status=400)
+        return Response({'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+@swagger_auto_schema(
+    method='post',
+    operation_description="Foydalanuvchini tizimga kiritadi.",
+    request_body=openapi.Schema(
+        type=openapi.TYPE_OBJECT,
+        required=['phone_number', 'password', 'device_id'],
+        properties={
+            'phone_number': openapi.Schema(type=openapi.TYPE_STRING, example='+998901234567'),
+            'password': openapi.Schema(type=openapi.TYPE_STRING, example='parol123'),
+            'device_id': openapi.Schema(type=openapi.TYPE_STRING, example='abcd1234'),
+            'device_name': openapi.Schema(type=openapi.TYPE_STRING, example='Redmi Note 11'),
+        },
+    ),
+    responses={
+        200: openapi.Response('Muvaffaqiyatli login', examples={'application/json': {
+            'message': 'Muvaffaqiyatli tizimga kirildi.',
+            'access': 'jwt-access-token',
+            'refresh': 'jwt-refresh-token'
+        }}),
+        400: 'Login xatosi',
+        403: 'Foydalanuvchi bloklangan'
+    }
+)
+@api_view(['POST'])
+@permission_classes([AllowAny])
+def login_api(request):
+    phone_number = request.data.get('phone_number')
+    password = request.data.get('password')
+    device_id = request.data.get('device_id')
+    device_name = request.data.get('device_name') or "unknown"
+
+    if not phone_number or not password or not device_id:
+        return Response({"error": "Telefon raqami, parol va qurilma ID talab qilinadi."}, status=status.HTTP_400_BAD_REQUEST)
+
+    user = authenticate(username=phone_number, password=password)
+
+    if user is not None:
+        if user.status != 'Active':
+            return Response({'error': "Siz bloklangansiz. Juda ko'p qurilmalardan tizimga kirishga uringansiz yoki hali darslikni sotib olmagansiz"},
+                            status=status.HTTP_403_FORBIDDEN)
+
+        if not user.is_superuser:
+            device = UserDevice.objects.filter(user=user, device_id=device_id).first()
+
+            if device:
+                device.last_login = timezone.now()
+                device.save()
+            else:
+                devices = UserDevice.objects.filter(user=user)
+                if devices.count() >= 5:
+                    user.status = 'Block'
+                    user.save()
+                    devices.delete()
+                    return Response({'error': "Siz bloklangansiz. Juda ko'p moslamalarda tizimga kirishga harakat qildingiz."},
+                                    status=status.HTTP_403_FORBIDDEN)
+
+                UserDevice.objects.create(user=user, device_id=device_id, device_name=device_name)
+
+        login(request, user)
+
+        tokens = get_tokens_for_user(user)
+
+        return Response({
+            'message': "Muvaffaqiyatli tizimga kirildi.",
+            'access': tokens['access'],
+            'refresh': tokens['refresh'],
+        }, status=status.HTTP_200_OK)
+
+    return Response({'error': "Telefon raqami yoki parol noto'g'ri kiritilgan."}, status=status.HTTP_400_BAD_REQUEST)
+
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def logout_api(request):
+    logout(request)
+    return Response({'message': "Muvaffaqiyatli chiqildi."}, status=status.HTTP_200_OK)
 
 
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
-def logout_view(request):
-    device_id = get_device_id(request)
-    device_id = UserDevice.objects.filter(device_id=device_id)
-    device_id.delete()
-    logout(request)
-    return Response({'data':'sucses'})
+def video_list_api(request):
+    user = request.user
+
+    # Avtomatik status tekshirish
+    if user.course_expire_date and user.course_expire_date < timezone.now():
+        if user.status != 'Block':
+            user.status = 'Block'
+            user.save()
+
+    # Bloklangan bo‘lsa, kirish taqiqlanadi
+    if user.status == 'Block':
+        return Response({'error': 'Foydalanuvchi bloklangan.'}, status=status.HTTP_403_FORBIDDEN)
+
+    all_videos = Video.objects.all()
+    modules = {}
+
+    for video in all_videos:
+        if video.category not in modules:
+            modules[video.category] = {
+                'name': video.category,
+                'videos': []
+            }
+
+        url = f"https://dev.vdocipher.com/api/videos/{video.video_id}/otp"
+        payload = json.dumps({"whitelisthref": "vdocipher.com"})
+        headers = {
+            'Authorization': "Apisecret oCxi0FTzAXOZxDPMddQcFZ3NQ3NpsIrtByd2fbghtwvdgwAcNsl0u3DhjN2VK3Al",
+            'Content-Type': "application/json",
+            'Accept': "application/json"
+        }
+
+        try:
+            response = requests.post(url, data=payload, headers=headers)
+            if response.status_code == 200:
+                result = response.json()
+                modules[video.category]['videos'].append({
+                    'video_id': video.video_id,
+                    'video_name': video.video_name,
+                    'otp': result['otp'],
+                    'playbackInfo': result['playbackInfo']
+                })
+        except Exception as e:
+            print(f"Error fetching OTP for video {video.video_id}: {e}")
+
+    return Response({'modules': list(modules.values())}, status=status.HTTP_200_OK)
 
 
-class GetUser(ListAPIView):
-    queryset = User.objects.all()
-    serializer_class = UserSerializers
 
 
-class UpdateUser(UpdateAPIView):
-    queryset = User.objects.all()
-    serializer_class = UserSerializers
+def staff_required(view_func):
+    def _wrapped_view(request, *args, **kwargs):
+        if not request.user.is_staff:
+            return Response({'detail': 'Permission denied'}, status=status.HTTP_403_FORBIDDEN)
+        return view_func(request, *args, **kwargs)
+    return _wrapped_view
 
 
-class DeleteUser(DestroyAPIView):
-    queryset = User.objects.all()
-    serializer_class = UserSerializers
+# --- Video CRUD ---
+@swagger_auto_schema(method='get', responses={200: VideoSerializer(many=True)})
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+@staff_required
+def video_list(request):
+    videos = Video.objects.all()
+    serializer = VideoSerializer(videos, many=True)
+    return Response(serializer.data)
 
 
-def get_device_name(user_agent):
-    parsed_data = httpagentparser.detect(user_agent)
-    os_info = parsed_data.get('os', {})
-    browser_info = parsed_data.get('browser', {})
-    device_name = os_info.get('name', 'Unknown OS')
-    device_version = os_info.get('version', '')
-    browser_name = browser_info.get('name', 'Unknown Browser')
-    browser_version = browser_info.get('version', '')
-    return f"{device_name} {device_version} - {browser_name} {browser_version}"
+@swagger_auto_schema(method='post', request_body=VideoSerializer, responses={201: VideoSerializer})
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+@staff_required
+def video_create(request):
+    serializer = VideoSerializer(data=request.data)
+    if serializer.is_valid():
+        serializer.save()
+        return Response(serializer.data, status=status.HTTP_201_CREATED)
+    return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
 
-class UserDeviceListView(APIView):
-    permission_classes = [IsAuthenticated]
+@swagger_auto_schema(method='get', responses={200: VideoSerializer})
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+@staff_required
+def video_detail(request, pk):
+    video = get_object_or_404(Video, pk=pk)
+    serializer = VideoSerializer(video)
+    return Response(serializer.data)
 
-    def get(self, request):
-        devices = UserDevice.objects.filter(user=request.user)
-        serializer = UserDeviceSerializer(devices, many=True)
+
+@swagger_auto_schema(method='put', request_body=VideoSerializer, responses={200: VideoSerializer})
+@api_view(['PUT'])
+@permission_classes([IsAuthenticated])
+@staff_required
+def video_update(request, pk):
+    video = get_object_or_404(Video, pk=pk)
+    serializer = VideoSerializer(video, data=request.data)
+    if serializer.is_valid():
+        serializer.save()
         return Response(serializer.data)
-
-    def post(self, request):
-        device_id = request.data.get('device_id')
-        device_name = get_device_name(request.META['HTTP_USER_AGENT'])
-
-        user_device, created = UserDevice.objects.get_or_create(
-            user=request.user,
-            device_id=device_id,
-            defaults={'device_name': device_name}
-        )
-
-        if not created:
-            return Response({"message": "Device already exists."}, status=400)
-
-        # Qurilma sonini tekshirish va eski qurilmani o'chirish
-        device_count = UserDevice.objects.filter(user=request.user).count()
-        if device_count > 3:
-            oldest_device = UserDevice.objects.filter(user=request.user).order_by('last_login').first()
-            oldest_device.delete()
-
-        serializer = UserDeviceSerializer(user_device)
-        return Response(serializer.data, status=201)
+    return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
 
+@swagger_auto_schema(method='delete', responses={204: 'No Content'})
 @api_view(['DELETE'])
-def delete_device_view(request, device_id):
-    try:
-        # Qurilmani ID bo'yicha olish
-        device = UserDevice.objects.get(device_id=device_id)
-        device.delete()
-        return Response({"message": "Device deleted successfully."}, status=200)
-    except UserDevice.DoesNotExist:
-        raise Http404("No UserDevice matches the given query.")
-    except Exception as err:
-        return Response({"error": str(err)}, status=500)
+@permission_classes([IsAuthenticated])
+@staff_required
+def video_delete(request, pk):
+    video = get_object_or_404(Video, pk=pk)
+    video.delete()
+    return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+# --- Book CRUD ---
+@swagger_auto_schema(method='get', responses={200: BookSerializer(many=True)})
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+# @staff_required
+def book_list(request):
+    books = Book.objects.all()
+    serializer = BookSerializer(books, many=True)
+    return Response(serializer.data)
+
+
+@swagger_auto_schema(method='post', request_body=BookSerializer, responses={201: BookSerializer})
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+@staff_required
+def book_create(request):
+    serializer = BookSerializer(data=request.data)
+    if serializer.is_valid():
+        serializer.save()
+        return Response(serializer.data, status=status.HTTP_201_CREATED)
+    return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+
+@swagger_auto_schema(method='get', responses={200: BookSerializer})
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+# @staff_required
+def book_detail(request, pk):
+    book = get_object_or_404(Book, pk=pk)
+    serializer = BookSerializer(book)
+    return Response(serializer.data)
+
+
+@swagger_auto_schema(method='put', request_body=BookSerializer, responses={200: BookSerializer})
+@api_view(['PUT'])
+@permission_classes([IsAuthenticated])
+@staff_required
+def book_update(request, pk):
+    book = get_object_or_404(Book, pk=pk)
+    serializer = BookSerializer(book, data=request.data)
+    if serializer.is_valid():
+        serializer.save()
+        return Response(serializer.data)
+    return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+
+@swagger_auto_schema(method='delete', responses={204: 'No Content'})
+@api_view(['DELETE'])
+@permission_classes([IsAuthenticated])
+@staff_required
+def book_delete(request, pk):
+    book = get_object_or_404(Book, pk=pk)
+    book.delete()
+    return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+# --- News CRUD ---
+@swagger_auto_schema(method='get', responses={200: NewsSerializer(many=True)})
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+# @staff_required
+def news_list(request):
+    news = News.objects.all()
+    serializer = NewsSerializer(news, many=True)
+    return Response(serializer.data)
+
+
+@swagger_auto_schema(method='post', request_body=NewsSerializer, responses={201: NewsSerializer})
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+@staff_required
+def news_create(request):
+    serializer = NewsSerializer(data=request.data)
+    if serializer.is_valid():
+        serializer.save()
+        return Response(serializer.data, status=status.HTTP_201_CREATED)
+    return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+
+@swagger_auto_schema(method='get', responses={200: NewsSerializer})
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+# @staff_required
+def news_detail(request, pk):
+    news = get_object_or_404(News, pk=pk)
+    serializer = NewsSerializer(news)
+    return Response(serializer.data)
+
+
+@swagger_auto_schema(method='put', request_body=NewsSerializer, responses={200: NewsSerializer})
+@api_view(['PUT'])
+@permission_classes([IsAuthenticated])
+@staff_required
+def news_update(request, pk):
+    news = get_object_or_404(News, pk=pk)
+    serializer = NewsSerializer(news, data=request.data)
+    if serializer.is_valid():
+        serializer.save()
+        return Response(serializer.data)
+    return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+
+@swagger_auto_schema(method='delete', responses={204: 'No Content'})
+@api_view(['DELETE'])
+@permission_classes([IsAuthenticated])
+@staff_required
+def news_delete(request, pk):
+    news = get_object_or_404(News, pk=pk)
+    news.delete()
+    return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+@swagger_auto_schema(method='put', request_body=UserUpdateSerializer, responses={200: UserUpdateSerializer})
+@api_view(['PUT'])
+@permission_classes([IsAuthenticated, IsStaff])
+def update_user_status_course_month(request, pk):
+    user = get_object_or_404(User, pk=pk)
+    serializer = UserUpdateSerializer(user, data=request.data, partial=True)
+    if serializer.is_valid():
+        course_month = serializer.validated_data.get('course_month', None)
+
+        # Agar course_month kiritilgan bo‘lsa, statusni Active va expire date qo‘shamiz
+        if course_month is not None:
+            now = timezone.now()
+            months_map = {
+                0: 1,
+                1: 3,
+                2: 6,
+                3: 12
+            }
+            months = months_map.get(course_month, 0)
+            expire_date = now + timedelta(days=30 * months)
+            user.course_expire_date = expire_date
+            user.status = 'Active'
+
+        serializer.save()
+        return Response(UserUpdateSerializer(user).data)
+    return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
