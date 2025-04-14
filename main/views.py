@@ -442,3 +442,13 @@ def update_user_status_course_month(request, pk):
         serializer.save()
         return Response(UserUpdateSerializer(user).data)
     return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+@swagger_auto_schema(
+    method='get',
+    responses={200: UserProfileSerializer}
+)
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def user_profile(request):
+    serializer = UserProfileSerializer(request.user)
+    return Response(serializer.data)

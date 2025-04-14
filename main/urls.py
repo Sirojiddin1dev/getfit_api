@@ -7,6 +7,7 @@ from rest_framework_simplejwt.views import (
 
 
 urlpatterns = [
+    path('api/profile/', views.user_profile, name='user-profile'),
     path('signup/', views.signup_api, name='signup_api'),
     path('login/', views.login_api, name='login_api'),
     path('logout/', views.logout_api, name='logout_api'),
@@ -28,5 +29,6 @@ urlpatterns = [
     path('admin/news/create/', views.news_create),
     path('admin/news/<int:pk>/', views.news_detail),
     path('admin/news/<int:pk>/update/', views.news_update),
+    path('admin/user/<int:pk>/update/', views.update_user_status_course_month),
     path('admin/news/<int:pk>/delete/', views.news_delete),
 ]

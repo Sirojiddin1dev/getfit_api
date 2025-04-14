@@ -5,16 +5,26 @@ from .models import User, UserDevice, Video, Book, News
 
 @admin.register(User)
 class UserAdmin(BaseUserAdmin):
-    fieldsets = BaseUserAdmin.fieldsets + (
+    fieldsets = (
+        (None, {'fields': ('username', 'password')}),
+        ('Personal info', {'fields': ('first_name', 'last_name', 'email', 'phone_number')}),
+        ('Permissions', {'fields': ('is_active', 'is_staff', 'is_superuser', 'groups', 'user_permissions')}),
+        ('Course Info', {'fields': ('status', 'course_month', 'course_expire_date')}),
+        ('Important dates', {'fields': ('last_login', 'date_joined')}),
+    )
+
+    add_fieldsets = (
         (None, {
-            'fields': ('phone_number', 'status', 'course_month')
+            'classes': ('wide',),
+            'fields': ('username', 'phone_number', 'password1', 'password2', 'status', 'course_month'),
         }),
     )
+
     list_display = ('username', 'phone_number', 'status', 'course_month', 'is_staff')
     list_filter = ('status', 'course_month', 'is_staff', 'is_superuser')
     search_fields = ('username', 'phone_number')
     ordering = ('-date_joined',)
-    readonly_fields = ('last_login', 'date_joined')
+    readonly_fields = ('last_login', 'date_joined', 'course_expire_date')
 
 
 @admin.register(UserDevice)
