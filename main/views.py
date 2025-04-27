@@ -98,6 +98,7 @@ def signup_api(request):
         tokens = get_tokens_for_user(user)
 
         return Response({
+            "id":user.pk,
             'message': 'Foydalanuvchi muvaffaqiyatli ro‘yxatdan o‘tdi. Siz hozircha blokdasiz.',
             'access': tokens['access'],
             'refresh': tokens['refresh']
@@ -174,6 +175,7 @@ def login_api(request):
         tokens = get_tokens_for_user(user)
 
         return Response({
+            'id':user.pk,
             'message': "Muvaffaqiyatli tizimga kirildi.",
             'access': tokens['access'],
             'refresh': tokens['refresh'],
